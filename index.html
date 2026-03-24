@@ -96,19 +96,31 @@
       border-radius: 8px;
       padding: 16px;
       font-size: 0.82rem;
-      line-height: 1.7;
+      line-height: 1.8;
       color: #888;
-      max-height: 180px;
+      max-height: 320px;
       overflow-y: auto;
-      white-space: pre-wrap;
       word-break: break-word;
     }
-    #textPreview.has-text { color: #ccc; }
+    .chunk-span {
+      cursor: pointer;
+      border-radius: 3px;
+      padding: 1px 2px;
+      transition: background 0.15s, color 0.15s;
+    }
+    .chunk-span:hover { background: #2a2a2a; color: #ddd; }
+    .chunk-span.active {
+      background: #2a2060;
+      color: #fff;
+      outline: 1px solid #7c6af7;
+    }
+
     #status { font-size: 0.78rem; color: #666; text-align: center; margin-top: 8px; min-height: 18px; }
     #status.active { color: #7c6af7; }
     #status.error { color: #e07070; }
 
     .note { font-size: 0.75rem; color: #555; margin-top: 10px; line-height: 1.5; }
+    .seek-hint { font-size: 0.72rem; color: #444; margin-top: 8px; }
   </style>
 </head>
 <body>
@@ -152,6 +164,8 @@
       <button class="primary" id="playBtn" disabled>▶ Play</button>
       <button id="pauseBtn" disabled>⏸ Pause</button>
       <button class="danger" id="stopBtn" disabled>■ Stop</button>
+      <button id="prevBtn" disabled>&#8592; Prev</button>
+      <button id="nextBtn" disabled>Next &#8594;</button>
     </div>
     <div class="progress-bar" id="progressBar"><div class="progress-fill" id="progressFill"></div></div>
     <div id="status">Upload a PDF to begin</div>
@@ -160,6 +174,7 @@
   <div class="card">
     <div class="label">Extracted Text</div>
     <div id="textPreview">No document loaded.</div>
+    <p class="seek-hint" id="seekHint"></p>
   </div>
 
   <script>
@@ -168,7 +183,6 @@
     let extractedText = '';
     let selectedVoice = 'Joanna';
     let selectedEngine = 'neural';
-    let audioQueue = [];
     let currentAudio = null;
     let isPaused = false;
     let isPlaying = false;
@@ -200,16 +214,75 @@
           text += content.items.map(s => s.str).join(' ') + '\n\n';
         }
         extractedText = text.trim();
-        const preview = document.getElementById('textPreview');
-        preview.textContent = extractedText || 'No readable text found.';
-        preview.className = extractedText ? 'has-text' : '';
         uploadArea.querySelector('strong').textContent = file.name;
         uploadArea.querySelector('p').textContent = `${pdf.numPages} page${pdf.numPages !== 1 ? 's' : ''} · ${extractedText.length.toLocaleString()} chars`;
+
+        if (extractedText) {
+          chunks = splitIntoChunks(extractedText);
+          renderChunks();
+          document.getElementById('seekHint').textContent = 'Click any paragraph to start reading from there.';
+        } else {
+          document.getElementById('textPreview').textContent = 'No readable text found.';
+        }
+
         document.getElementById('playBtn').disabled = !extractedText;
         setStatus(extractedText ? 'Ready' : 'No readable text found.', extractedText ? '' : 'error');
       } catch(e) {
         setStatus('Failed to read PDF.', 'error');
       }
+    }
+
+    function stripEmojis(text) {
+      return text
+        .replace(/[\u{1F600}-\u{1F64F}]/gu, '')
+        .replace(/[\u{1F300}-\u{1F5FF}]/gu, '')
+        .replace(/[\u{1F680}-\u{1F6FF}]/gu, '')
+        .replace(/[\u{1F700}-\u{1F77F}]/gu, '')
+        .replace(/[\u{1F780}-\u{1F7FF}]/gu, '')
+        .replace(/[\u{1F800}-\u{1F8FF}]/gu, '')
+        .replace(/[\u{1F900}-\u{1F9FF}]/gu, '')
+        .replace(/[\u{1FA00}-\u{1FA6F}]/gu, '')
+        .replace(/[\u{1FA70}-\u{1FAFF}]/gu, '')
+        .replace(/[\u{2600}-\u{26FF}]/gu, '')
+        .replace(/[\u{2700}-\u{27BF}]/gu, '')
+        .replace(/[\u{FE00}-\u{FE0F}]/gu, '')
+        .replace(/[\u{1F1E0}-\u{1F1FF}]/gu, '')
+        .replace(/\uFE0F/gu, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    function renderChunks() {
+      const preview = document.getElementById('textPreview');
+      preview.innerHTML = '';
+      chunks.forEach((chunk, idx) => {
+        const span = document.createElement('span');
+        span.className = 'chunk-span';
+        span.dataset.idx = idx;
+        span.textContent = chunk + ' ';
+        span.addEventListener('click', () => seekToChunk(idx));
+        preview.appendChild(span);
+      });
+    }
+
+    function highlightChunk(idx) {
+      document.querySelectorAll('.chunk-span').forEach(s => s.classList.remove('active'));
+      const active = document.querySelector(`.chunk-span[data-idx="${idx}"]`);
+      if (active) {
+        active.classList.add('active');
+        active.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+    }
+
+    function seekToChunk(idx) {
+      stopAll();
+      currentChunkIndex = idx;
+      isPlaying = true;
+      isPaused = false;
+      document.getElementById('progressBar').style.display = 'block';
+      setBtns(false, true, true);
+      document.getElementById('playBtn').textContent = '▶ Play';
+      playChunk(currentChunkIndex);
     }
 
     // Voice selection
@@ -256,7 +329,7 @@
         return;
       }
       stopAll();
-      chunks = splitIntoChunks(extractedText);
+      if (!chunks.length) chunks = splitIntoChunks(extractedText);
       currentChunkIndex = 0;
       isPlaying = true;
       document.getElementById('progressBar').style.display = 'block';
@@ -266,16 +339,25 @@
 
     async function playChunk(idx) {
       if (!isPlaying || idx >= chunks.length) {
-        if (idx >= chunks.length) { setStatus('Finished.', ''); setBtns(true, false, false); document.getElementById('progressBar').style.display = 'none'; }
+        if (idx >= chunks.length) {
+          setStatus('Finished.', '');
+          setBtns(true, false, false);
+          document.getElementById('progressBar').style.display = 'none';
+          highlightChunk(-1);
+        }
         return;
       }
       const pct = Math.round((idx / chunks.length) * 100);
       document.getElementById('progressFill').style.width = pct + '%';
-      setStatus(`Reading… chunk ${idx + 1} of ${chunks.length}`, 'active');
+      setStatus(`Reading… ${idx + 1} / ${chunks.length}`, 'active');
+      highlightChunk(idx);
+      document.getElementById('prevBtn').disabled = idx === 0;
+      document.getElementById('nextBtn').disabled = false;
 
       try {
         const rate = parseInt(speedRange.value) / 100;
-        const audio = await puter.ai.txt2speech(chunks[idx], {
+        const cleanText = stripEmojis(chunks[idx]);
+        const audio = await puter.ai.txt2speech(cleanText, {
           voice: selectedVoice,
           engine: selectedEngine,
           language: 'en-US'
@@ -314,6 +396,14 @@
       document.getElementById('playBtn').textContent = '▶ Play';
     });
 
+    document.getElementById('prevBtn').addEventListener('click', () => {
+      if (currentChunkIndex > 0) seekToChunk(currentChunkIndex - 1);
+    });
+
+    document.getElementById('nextBtn').addEventListener('click', () => {
+      if (currentChunkIndex < chunks.length - 1) seekToChunk(currentChunkIndex + 1);
+    });
+
     function stopAll() {
       isPlaying = false;
       isPaused = false;
@@ -325,6 +415,8 @@
       document.getElementById('playBtn').disabled = !play || !extractedText;
       document.getElementById('pauseBtn').disabled = !pause;
       document.getElementById('stopBtn').disabled = !stop;
+      document.getElementById('prevBtn').disabled = !stop;
+      document.getElementById('nextBtn').disabled = !stop;
     }
 
     function setStatus(msg, cls) {
