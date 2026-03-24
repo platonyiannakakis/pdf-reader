@@ -213,7 +213,7 @@
           const content = await page.getTextContent();
           text += content.items.map(s => s.str).join(' ') + '\n\n';
         }
-        extractedText = text.trim();
+        extractedText = cleanText(text.trim());
         uploadArea.querySelector('strong').textContent = file.name;
         uploadArea.querySelector('p').textContent = `${pdf.numPages} page${pdf.numPages !== 1 ? 's' : ''} · ${extractedText.length.toLocaleString()} chars`;
 
@@ -230,6 +230,17 @@
       } catch(e) {
         setStatus('Failed to read PDF.', 'error');
       }
+    }
+
+    function cleanText(text) {
+      return text
+        // Fix missing space after sentence-ending punctuation (e.g. "word.Next" → "word. Next")
+        .replace(/([.!?])([A-Z])/g, '$1 $2')
+        // Fix hyphenated line breaks from PDFs (e.g. "impor-\n tant" → "important")
+        .replace(/-\s*\n\s*/g, '')
+        // Collapse multiple spaces/newlines into a single space
+        .replace(/\s+/g, ' ')
+        .trim();
     }
 
     function stripEmojis(text) {
@@ -368,7 +379,7 @@
         audio.onended = () => {
           if (!isPlaying) return;
           currentChunkIndex++;
-          playChunk(currentChunkIndex);
+          setTimeout(() => playChunk(currentChunkIndex), 450);
         };
         audio.play();
       } catch(e) {
